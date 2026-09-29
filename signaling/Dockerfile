@@ -12,9 +12,22 @@ RUN apk add --no-cache tini
 
 WORKDIR /app
 
-# 先只拷依赖清单再安装 —— 改代码不会让依赖层缓存失效
-COPY package.json ./
-RUN npm install --omit=dev --no-audit --no-fund
+# ---------------------------------------------------------------------------
+# 依赖安装
+#
+# 同时拷贝 package-lock.json 并使用 npm ci：
+#   · lock 文件锁定了完整依赖树（含 30+ 传递依赖）与每个包的校验和，
+#     无需联网解析版本范围 —— 这是构建耗时的主要来源
+#   · npm ci 严格按 lock 安装，不会因上游发新版而装出不同结果
+#   · 校验和不匹配会直接报错，能挡住被篡改的包
+#
+# 没有 lock 文件时 npm install 必须逐个查询 registry 元数据再解析版本，
+# 即便服务器在国外也会明显变慢。
+#
+# 先只拷依赖清单再安装 —— 改代码不会让这一层缓存失效。
+# ---------------------------------------------------------------------------
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund
 
 COPY server.js ./
 
