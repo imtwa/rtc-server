@@ -1,19 +1,22 @@
 # ============================================================================
 # WebRTC 信令 + TURN 服务
 #
+# 从 GitHub 拉取源码构建，服务器上无需手动克隆仓库。
+#
 # 部署：
 #   cp .env.example .env      # 填 TURN_PUBLIC_IP、TURN_DOMAIN、TURN_SECRET
 #   docker compose up -d --build
 #   docker compose logs -f
+#
+# 更新（仓库有新提交时）：
+#   docker compose build --no-cache && docker compose up -d
 #
 # 对外暴露：
 #   17300           -> 信令（HTTP + socket.io，同一端口）
 #   34780           -> STUN / TURN
 #   49152-65535/udp -> TURN 中继端口段（可调，见 .env）
 #
-# 信令端口刻意避开惯例值（3000），减少公网扫描器探测噪音。
-#
-# 信令只占 17300 一个端口，用你自己的域名反向代理到它即可（如
+# 信令只占 17300 一个端口，用域名反向代理到它即可（如
 # https://rtc.example.com -> 127.0.0.1:17300）。
 #
 # 反代时注意三点（与普通 HTTP 服务不同）：
@@ -32,7 +35,10 @@ services:
     # ------------------------------------------------------------------
     signaling:
         build:
-            context: ./signaling
+            # 直接用 GitHub 仓库作构建上下文。
+            # 分支为 master（不是 main），见仓库默认分支设置。
+            context: https://github.com/imtwa/rtc-server.git#master
+            dockerfile: signaling/Dockerfile
         image: rtc-signaling:latest
         container_name: rtc-signaling
         restart: unless-stopped
@@ -45,8 +51,8 @@ services:
             TURN_SECRET: ${TURN_SECRET}
             # 下发给客户端的 TURN 域名（DNS 解析到本机）
             TURN_DOMAIN: ${TURN_DOMAIN}
-            TURN_PORT: '34780'
-            TURN_TLS_PORT: '53490'
+            TURN_PORT: ${TURN_PORT:-34780}
+            TURN_TLS_PORT: ${TURN_TLS_PORT:-53490}
             # 未给 coturn 配证书时保持 false，避免下发不可达的 turns: 条目
             TURN_TLS_ENABLE: 'false'
             # 凭据有效期（秒），与 coturn 会话上限对齐
@@ -87,18 +93,11 @@ services:
     # 「能启动但连不通」的常见原因。
     #
     # host 模式仅在 Linux 上有效（Docker Desktop for Win/Mac 不支持）。
-    #
-    # ## 端口容量说明
-    #
-    # 一个 TURN allocation 占 1 个端口；一条走中继的连接需要两端各一个，
-    # 即 2 个。mesh 房间 N 人的总占用为 N×(N-1)。
-    # 开到 16384 个端口时理论上支持上百人，但实际先撞的是带宽墙：
-    # TURN 双向转发，每个流收一次发一次，3 人全中继约需 7 Mbps，
-    # 轻量服务器通常只有 3-5 Mbps。
     # ------------------------------------------------------------------
     coturn:
         build:
-            context: ./coturn
+            context: https://github.com/imtwa/rtc-server.git#master
+            dockerfile: coturn/Dockerfile
         image: rtc-coturn:latest
         container_name: rtc-coturn
         restart: unless-stopped
