@@ -1,0 +1,127 @@
+# ============================================================================
+# WebRTC 信令 + TURN 服务
+#
+# 部署：
+#   cp .env.example .env      # 填 TURN_PUBLIC_IP、TURN_DOMAIN、TURN_SECRET
+#   docker compose up -d --build
+#   docker compose logs -f
+#
+# 对外暴露：
+#   17300           -> 信令（HTTP + socket.io，同一端口）
+#   34780           -> STUN / TURN
+#   49152-65535/udp -> TURN 中继端口段（可调，见 .env）
+#
+# 信令端口刻意避开惯例值（3000），减少公网扫描器探测噪音。
+#
+# 信令只占 17300 一个端口，用你自己的域名反向代理到它即可（如
+# https://rtc.example.com -> 127.0.0.1:17300）。
+#
+# 反代时注意三点（与普通 HTTP 服务不同）：
+#   1. 支持 WebSocket 升级（socket.io 会从 polling 升到 websocket）
+#   2. 关闭响应缓冲（长轮询是流式响应，缓冲会让信令时快时慢）
+#   3. 不要在反代层加 CORS 头（后端已处理，重复会让浏览器拒绝响应）
+#
+# TURN 无法用域名反代：它是原生 UDP/TCP 协议，HTTP 反代转发不了。
+# 34780 与中继端口段需在安全组直接放行，客户端用
+# turn:rtc.example.com:34780 直连（域名仅起 DNS 解析作用）。
+# ============================================================================
+
+services:
+    # ------------------------------------------------------------------
+    # 信令服务：转发 WebRTC 信令 + 签发 TURN 临时凭据
+    # ------------------------------------------------------------------
+    signaling:
+        build:
+            context: ./signaling
+        image: rtc-signaling:latest
+        container_name: rtc-signaling
+        restart: unless-stopped
+        ports:
+            - '17300:17300'
+        environment:
+            PORT: '17300'
+            TZ: Asia/Shanghai
+            # 与 coturn 完全一致，否则中继请求会被拒
+            TURN_SECRET: ${TURN_SECRET}
+            # 下发给客户端的 TURN 域名（DNS 解析到本机）
+            TURN_DOMAIN: ${TURN_DOMAIN}
+            TURN_PORT: '34780'
+            TURN_TLS_PORT: '53490'
+            # 未给 coturn 配证书时保持 false，避免下发不可达的 turns: 条目
+            TURN_TLS_ENABLE: 'false'
+            # 凭据有效期（秒），与 coturn 会话上限对齐
+            TURN_TTL: '43200'
+            # 跨域放行。浏览器端上线后建议收窄为前端域名。
+            ALLOW_ORIGIN: ${ALLOW_ORIGIN:-*}
+        healthcheck:
+            test:
+                - CMD
+                - node
+                - -e
+                - "require('http').get('http://127.0.0.1:17300/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+            interval: 30s
+            timeout: 5s
+            retries: 3
+            start_period: 10s
+        logging:
+            driver: json-file
+            options:
+                max-size: '10m'
+                max-file: '3'
+
+    # ------------------------------------------------------------------
+    # coturn：NAT 打洞失败时的中继兜底
+    #
+    # 移动网络多为对称型 NAT / CGNAT，打洞基本不可能成功 ——
+    # 没有 TURN 就只能同局域网互通。
+    #
+    # ## 为什么用 host 网络（与 signaling 不同）
+    #
+    # TURN 需要一整段 UDP 端口做中继，而 Docker 的端口范围映射会为每个端口
+    # 逐条生成 iptables 规则。范围小时尚可，一旦按 coturn 标准开到
+    # 49152-65535（16384 个），容器启动会卡顿甚至失败。
+    #
+    # host 模式下容器直接绑宿主网卡，没有映射开销，可以开满整个范围；
+    # 而且 coturn 对外公布的 relay 地址与真实地址天然一致 ——
+    # bridge 模式下容器内看到的 IP 与宿主公网 IP 不同，这是自建 TURN
+    # 「能启动但连不通」的常见原因。
+    #
+    # host 模式仅在 Linux 上有效（Docker Desktop for Win/Mac 不支持）。
+    #
+    # ## 端口容量说明
+    #
+    # 一个 TURN allocation 占 1 个端口；一条走中继的连接需要两端各一个，
+    # 即 2 个。mesh 房间 N 人的总占用为 N×(N-1)。
+    # 开到 16384 个端口时理论上支持上百人，但实际先撞的是带宽墙：
+    # TURN 双向转发，每个流收一次发一次，3 人全中继约需 7 Mbps，
+    # 轻量服务器通常只有 3-5 Mbps。
+    # ------------------------------------------------------------------
+    coturn:
+        build:
+            context: ./coturn
+        image: rtc-coturn:latest
+        container_name: rtc-coturn
+        restart: unless-stopped
+        # host 模式：不需要（也不该用）ports 映射。
+        # 端口由 turnserver.conf 的 listening-port / min-port / max-port 决定，
+        # 直接绑定在宿主机上。安全组按这些端口放行即可。
+        network_mode: host
+        environment:
+            TZ: Asia/Shanghai
+            # 服务器公网 IP，必须显式指定。
+            # 云主机是 1:1 NAT（内网 IP 不等于公网 IP），不指定的话 coturn 会把
+            # 内网地址写进 relay 候选，客户端拿到不可达地址，ICE 一直 checking
+            # 直到 failed，且日志里没有任何报错。
+            TURN_PUBLIC_IP: ${TURN_PUBLIC_IP}
+            # 与 signaling 共享的长期密钥
+            TURN_SECRET: ${TURN_SECRET}
+            # 监听端口与中继段（须与安全组放行范围一致）
+            TURN_PORT: ${TURN_PORT:-34780}
+            TURN_TLS_PORT: ${TURN_TLS_PORT:-53490}
+            TURN_RELAY_MIN: ${TURN_RELAY_MIN:-49152}
+            TURN_RELAY_MAX: ${TURN_RELAY_MAX:-65535}
+        logging:
+            driver: json-file
+            options:
+                max-size: '10m'
+                max-file: '3'

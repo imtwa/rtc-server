@@ -1,0 +1,16 @@
+{
+  "name": "rtc-signaling-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "WebRTC 信令服务（simple-signal 协议 + TURN 凭据签发）",
+  "main": "server.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "socket.io": "^4.7.5"
+  }
+}
