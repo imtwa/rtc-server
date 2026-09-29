@@ -26,10 +26,16 @@ WORKDIR /app
 #
 # 先只拷依赖清单再安装 —— 改代码不会让这一层缓存失效。
 # ---------------------------------------------------------------------------
-COPY package.json package-lock.json ./
+# 路径带 signaling/ 前缀
+#
+# 构建上下文根是**仓库根目录**（无论用 git 上下文还是本地目录），
+# dockerfile 参数只指定用哪个文件作为 Dockerfile，不改变上下文根。
+# 写成 COPY package.json 会去仓库根找，报 not found。
+# ---------------------------------------------------------------------------
+COPY signaling/package.json signaling/package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund
 
-COPY server.js ./
+COPY signaling/server.js ./
 
 # 非 root 运行
 RUN addgroup -S app && adduser -S app -G app && chown -R app:app /app

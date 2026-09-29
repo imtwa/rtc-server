@@ -12,8 +12,16 @@ FROM coturn/coturn:4.6-alpine
 
 USER root
 
-COPY turnserver.conf.tpl /etc/coturn/turnserver.conf.tpl
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+# ---------------------------------------------------------------------------
+# COPY 路径带 coturn/ 前缀
+#
+# 构建上下文根是**仓库根目录**（无论用 git 上下文还是本地目录），
+# dockerfile 参数只指定用哪个文件作为 Dockerfile，不改变上下文根。
+# 因此这里的路径必须从仓库根算起 —— 写成 COPY entrypoint.sh 会去仓库根找，
+# 报 "/entrypoint.sh": not found。
+# ---------------------------------------------------------------------------
+COPY coturn/turnserver.conf.tpl /etc/coturn/turnserver.conf.tpl
+COPY coturn/entrypoint.sh /usr/local/bin/entrypoint.sh
 
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
