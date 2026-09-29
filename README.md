@@ -28,6 +28,13 @@ WebRTC 建立连接依赖 ICE 收集三类候选：
 
 ## 快速开始
 
+提供两种部署方式，按你的环境二选一。
+
+| 方式 | 适用场景 | 需要的文件 |
+| --- | --- | --- |
+| [命令行部署](#方式一命令行部署) | 能 SSH 登录服务器 | `docker-compose.yml` + `.env` |
+| [面板部署](#方式二面板部署) | 用 1Panel / 宝塔 / Portainer 等容器面板 | `docker-compose.panel.yml` |
+
 ### 前置
 
 一台有公网 IP 的 Linux 服务器，已装 Docker：
@@ -37,41 +44,145 @@ curl -fsSL https://get.docker.com | sh
 sudo systemctl enable --now docker
 ```
 
-### 配置
+### 必做的三件事
 
-```bash
-git clone <本仓库>
-cd rtc-server
-cp .env.example .env
-```
+无论用哪种方式，都需要：
 
-编辑 `.env`：
-
-```bash
-# 服务器公网 IP（不是域名、不是内网 IP）
-TURN_PUBLIC_IP=1.2.3.4
-
-# 下发给客户端的 TURN 域名（需 DNS 解析到上面的 IP）
-TURN_DOMAIN=rtc.example.com
-
-# 与 coturn 共享的长期密钥
-TURN_SECRET=<openssl rand -hex 32 的输出>
-```
-
-生成密钥：
+**1. 生成密钥**
 
 ```bash
 openssl rand -hex 32
 ```
 
-### 启动
+**2. 配置 DNS**
 
-```bash
-docker compose up -d --build
-docker compose logs -f
+给 TURN 域名添加一条 A 记录，指向服务器公网 IP：
+
+```
+A    rtc    <服务器公网 IP>
 ```
 
-正常日志：
+**3. 放行端口**
+
+云控制台安全组与系统防火墙**两处都要**放行：
+
+| 端口 | 协议 | 用途 |
+| --- | --- | --- |
+| 34780 | TCP + UDP | STUN / TURN |
+| 49152-65535 | UDP | TURN 中继端口段 |
+| 17300 | TCP | 信令（走反向代理时只需 443） |
+
+---
+
+### 方式一：命令行部署
+
+适合能 SSH 登录服务器的场景，用 `.env` 文件管理配置。
+
+```bash
+git clone https://github.com/imtwa/rtc-server.git
+cd rtc-server
+```
+
+**生成配置**（会自动生成密钥）：
+
+```bash
+./init-env.sh
+```
+
+或一步到位：
+
+```bash
+./init-env.sh --ip 1.2.3.4 --domain rtc.example.com
+```
+
+**部署**：
+
+```bash
+./deploy.sh
+```
+
+**验证**：
+
+```bash
+./deploy.sh verify
+```
+
+`deploy.sh` 的其他子命令：
+
+```bash
+./deploy.sh logs     # 跟踪日志
+./deploy.sh status   # 状态与健康检查
+./deploy.sh update   # 无缓存重建
+./deploy.sh down     # 停止并移除容器
+```
+
+若不使用脚本，也可以手工执行：
+
+```bash
+cp .env.example .env    # 然后编辑填入三项必填
+docker compose up -d --build
+```
+
+---
+
+### 方式二：面板部署
+
+适合使用 1Panel、宝塔、Portainer 等容器面板的场景。变量内联在编排文件里，不依赖 `.env`。
+
+**步骤**
+
+1. 打开 `docker-compose.panel.yml`，全文复制
+2. 粘贴到面板的「容器编排 / Compose」输入框
+3. 替换其中**三处占位符**（见下）
+4. 点部署，等待构建完成（首次约 1-3 分钟）
+5. 验证
+
+**必改的三处**
+
+| 占位符 | 替换为 |
+| --- | --- |
+| `替换为-openssl-rand-hex-32-的输出` | 第 1 步生成的密钥（**两处，必须完全一致**） |
+| `rtc.example.com` | 你的 TURN 域名 |
+| `1.2.3.4` | 服务器公网 IP（**不是域名**） |
+
+`TURN_SECRET` 在 `signaling` 与 `coturn` 两处各出现一次。不一致会让 coturn 校验 HMAC 失败，所有中继请求被拒，而日志只显示认证失败，不易定位。
+
+**验证**
+
+面板部署后，SSH 到服务器执行：
+
+```bash
+# 健康检查：期望 {"ok":true,...,"turn":true}
+curl http://127.0.0.1:17300/health
+
+# ICE 配置：必须包含 turn: 开头的地址
+curl http://127.0.0.1:17300/rtc-config
+```
+
+`/rtc-config` 若只返回 `stun:`，说明 `TURN_SECRET` 或 `TURN_DOMAIN` 未生效。
+
+**日志里的正常现象**
+
+```
+Image rtc-signaling:latest Pulling
+Image rtc-signaling:latest pull access denied ...
+Image rtc-signaling:latest Building
+```
+
+这三行是正常的。compose 同时写了 `build:` 与 `image:`，Docker 会先尝试拉取现成镜像（本地没有，失败），再自动转为构建。`image:` 字段的作用是给构建产物命名。
+
+**面板部署的限制**
+
+`coturn` 使用 `network_mode: host`，有两个前提：
+
+- 宿主机必须是 **Linux**。Docker Desktop for Windows/Mac 不支持 host 模式。
+- 容器运行时**不能是 swarm 模式**。swarm 不支持 host 网络，会直接报错。
+
+若你的面板是 swarm 或 Kubernetes，需要改用端口映射版本，代价是中继端口段必须逐个映射，只能开较小范围（如 100 个端口，支持约 10 人同时全中继）。
+
+---
+
+### 正常启动日志
 
 ```
 [signal] 监听 :17300
@@ -79,17 +190,7 @@ docker compose logs -f
 [coturn] 生成配置：external-ip=1.2.3.4 port=34780 relay=49152-65535
 ```
 
-### 验证
-
-```bash
-# 健康检查
-curl http://127.0.0.1:17300/health
-
-# ICE 配置：必须包含 turn: 开头的地址
-curl http://127.0.0.1:17300/rtc-config
-```
-
-`/rtc-config` 若只返回 `stun:`，说明 `TURN_SECRET` 或 `TURN_DOMAIN` 未配置。
+若 `[signal] TURN` 那行显示「未配置」，说明 `TURN_SECRET` 或 `TURN_DOMAIN` 没传进容器，跨网络将无法建立连接。
 
 ## 端口与网络
 
@@ -381,14 +482,21 @@ docker compose down
 
 ```
 .
-├── docker-compose.yml
-├── .env.example
-├── signaling/
-│   ├── server.js               # 信令服务
+├── docker-compose.yml            # 命令行部署（配合 .env 与 deploy.sh）
+├── docker-compose.panel.yml      # 面板部署（变量内联，直接粘贴）
+├── .env.example                  # 环境变量模板
+├── init-env.sh                   # 生成 .env，自动生成密钥
+├── deploy.sh                     # 构建 / 启动 / 验证 / 更新
+├── signaling/                    # 信令服务
+│   ├── server.js
 │   ├── package.json
+│   ├── package-lock.json         # 锁定依赖版本，加速构建
 │   └── Dockerfile
-└── coturn/
-    ├── turnserver.conf.tpl     # 配置模板
-    ├── entrypoint.sh           # 启动时注入密钥
+└── coturn/                       # TURN 中继
+    ├── turnserver.conf.tpl       # 配置模板
+    ├── entrypoint.sh             # 启动时注入密钥
     └── Dockerfile
 ```
+
+两个 compose 文件的服务定义一致，按部署方式二选一，不要同时使用。
+

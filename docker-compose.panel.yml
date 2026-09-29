@@ -1,0 +1,124 @@
+# ============================================================================
+# WebRTC 信令 + TURN 服务 · 面板部署用编排文件
+#
+# 用途：面向「粘贴 compose 即可部署」的容器面板（1Panel、宝塔、Portainer、
+# 青龙面板等），不依赖 .env 文件，所有变量直接内联。
+#
+# 用法：
+#   1. 把本文件全文复制到面板的「容器编排 / Compose」输入框
+#   2. 替换下方三处占位符（见「必改项」）
+#   3. 点部署，等待构建完成（首次约 1-3 分钟）
+#   4. 执行验证命令（见 README「面板部署」章节）
+#
+# ---------------------------------------------------------------------------
+# 必改项（共 3 处）
+#
+#   TURN_PUBLIC_IP   服务器公网 IP。不是域名、不是内网 IP。
+#                    云主机是 1:NAT，内网 IP 与公网 IP 不同 —— 填错会让
+#                    coturn 把内网地址写进 relay 候选，客户端拿到不可达
+#                    地址，ICE 一直 checking 直到 failed，日志里无任何报错。
+#
+#   TURN_DOMAIN      下发给客户端的 TURN 域名，需 DNS 解析到上面的 IP。
+#
+#   TURN_SECRET      长期密钥，两处必须**完全一致**。
+#                    生成：openssl rand -hex 32
+#                    不一致会让 coturn 校验 HMAC 失败，所有中继请求被拒，
+#                    而日志只显示认证失败，不易定位。
+#
+# ---------------------------------------------------------------------------
+# 与 docker-compose.yml 的区别
+#
+#   docker-compose.yml         用 .env 文件注入变量，配合 deploy.sh 使用
+#   docker-compose.panel.yml   变量内联，直接粘贴到面板使用（本文件）
+#
+# 两者服务定义一致，按部署方式二选一即可，不要同时使用。
+# ============================================================================
+
+services:
+    # ------------------------------------------------------------------
+    # 信令服务：转发 WebRTC 信令 + 签发 TURN 临时凭据
+    # ------------------------------------------------------------------
+    signaling:
+        build:
+            # 直接用 GitHub 仓库作构建上下文，服务器上无需克隆代码。
+            # 分支为 master（不是 main）。
+            #
+            # 注意：构建上下文根是仓库根目录，dockerfile 参数只指定用哪个
+            # 文件作为 Dockerfile。Dockerfile 内的 COPY 路径已按仓库根书写。
+            context: https://github.com/imtwa/rtc-server.git#master
+            dockerfile: signaling/Dockerfile
+        image: rtc-signaling:latest
+        container_name: rtc-signaling
+        restart: unless-stopped
+        ports:
+            - '17300:17300'
+        environment:
+            PORT: '17300'
+            TZ: Asia/Shanghai
+            # 必改：与下方 coturn 的 TURN_SECRET 完全一致
+            TURN_SECRET: '替换为-openssl-rand-hex-32-的输出'
+            # 必改：DNS 解析到 TURN_PUBLIC_IP
+            TURN_DOMAIN: 'rtc.example.com'
+            TURN_PORT: '34780'
+            TURN_TLS_PORT: '53490'
+            # 未给 coturn 配证书时保持 false，避免下发不可达的 turns: 条目
+            TURN_TLS_ENABLE: 'false'
+            # 凭据有效期（秒），与 coturn 会话上限对齐
+            TURN_TTL: '43200'
+            # 跨域放行。浏览器端上线后建议收窄为前端域名。
+            ALLOW_ORIGIN: '*'
+        healthcheck:
+            test:
+                - CMD
+                - node
+                - -e
+                - "require('http').get('http://127.0.0.1:17300/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+            interval: 30s
+            timeout: 5s
+            retries: 3
+            start_period: 10s
+        logging:
+            driver: json-file
+            options:
+                max-size: '10m'
+                max-file: '3'
+
+    # ------------------------------------------------------------------
+    # coturn：NAT 打洞失败时的中继兜底
+    #
+    # 移动网络多为对称型 NAT / CGNAT，打洞基本不可能成功 ——
+    # 没有 TURN 就只能同局域网互通。
+    #
+    # 用 host 网络：TURN 需要一整段 UDP 端口做中继，Docker 的端口范围映射
+    # 会为每个端口逐条生成 iptables 规则，开到 16384 个时启动会卡顿甚至失败。
+    # host 模式下容器直接绑宿主网卡，无映射开销，且 coturn 对外公布的 relay
+    # 地址与真实地址天然一致。
+    #
+    # 前提：宿主机为 Linux，且容器运行时不是 swarm 模式（swarm 不支持 host）。
+    # ------------------------------------------------------------------
+    coturn:
+        build:
+            context: https://github.com/imtwa/rtc-server.git#master
+            dockerfile: coturn/Dockerfile
+        image: rtc-coturn:latest
+        container_name: rtc-coturn
+        restart: unless-stopped
+        # host 模式：不需要（也不该用）ports 映射。
+        # 端口由 turnserver.conf 的 listening-port / min-port / max-port 决定，
+        # 直接绑在宿主机上。安全组按这些端口放行即可。
+        network_mode: host
+        environment:
+            TZ: Asia/Shanghai
+            # 必改：服务器公网 IP
+            TURN_PUBLIC_IP: '1.2.3.4'
+            # 必改：与上方 signaling 的 TURN_SECRET 完全一致
+            TURN_SECRET: '替换为-openssl-rand-hex-32-的输出'
+            TURN_PORT: '34780'
+            TURN_TLS_PORT: '53490'
+            TURN_RELAY_MIN: '49152'
+            TURN_RELAY_MAX: '65535'
+        logging:
+            driver: json-file
+            options:
+                max-size: '10m'
+                max-file: '3'
